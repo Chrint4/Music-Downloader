@@ -1,3 +1,7 @@
 temp/
 out/
 covers/
+.venv/
+dist/
+build/
+MusicDownloader.spec
