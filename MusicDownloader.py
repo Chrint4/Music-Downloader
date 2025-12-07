@@ -17,7 +17,7 @@ from mutagen.id3 import TIT2, TPE1, TPE2, TALB, TDRC, TRCK, APIC, TYER
 from ytmusicapi import YTMusic
 from PIL import Image
 
-from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QHBoxLayout, QTextEdit, QFileDialog, QSpinBox)
+from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QHBoxLayout, QTextEdit, QFileDialog, QSpinBox, QCheckBox)
 from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtCore import Qt, QThread, Signal
 
@@ -53,7 +53,8 @@ def load_config():
         "temp_dir": os.path.join(os.getcwd(), "temp"),
         "cover_dir": os.path.join(os.getcwd(), "covers"),
         "starting_index": 0,
-        "max_threads": 32
+        "max_threads": 32,
+        "download_lyrics": True,
     }
 
     config_path = Path(os.path.join(os.getcwd(), "MusicDownloader.cfg"))
@@ -73,20 +74,23 @@ def load_config():
     return settings
 
 def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
+    is_playlist = False
+    data = None
+
     if not album_id:
         if not url: return
         r_is_album_OLAK = re.search(r'list\=(OLAK5uy_.+)', url)
         r_is_album_MPRE = re.search(r'list\=(MPREb_.+)', url)
         r_is_playlist = re.search(r'list\=(PL.+)', url)
 
-        is_playlist = False
-        data = None
 
         if r_is_album_MPRE or r_is_album_OLAK:
             album_id = r_is_album_OLAK.group(1)
             if r_is_album_OLAK:
                 album_id = yt.get_album_browse_id(album_id)
             data = yt.get_album(album_id)
+            import json
+            print(json.dumps(data, indent= 2))
         elif r_is_playlist:
             is_playlist = True
             playlist_id = r_is_playlist.group(1)
@@ -104,10 +108,11 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
         data_cover_url = re.sub(r'=s\d+$', "=s1200", data.get("thumbnails")[0]["url"])
         data_track_count = data.get("trackCount")
         data_albumId_cache = list(set(track["album"]["id"] for track in data["tracks"]))
+        # logger.out(f"=====\n{data_albumId_cache}\n=====")
         data_videoIds = [track["videoId"] for track in data["tracks"]]
+        # logger.out(str(data_videoIds))
 
-        data["albumId_cache"] = data_albumId_cache
-        data["videoIds"] = data_videoIds
+        # print(data_videoIds)
 
         data_tracks = []
         for track in data.get("tracks"):
@@ -138,11 +143,15 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
         'tracks': data_tracks,
     }
 
+    if is_playlist:
+        data["albumId_cache"] = data_albumId_cache
+        data["videoIds"] = data_videoIds
+
     logger.out(f"Found: {data['title']} - {data['artist']}")
     logger.out(f"Type: {data['type']}")
     logger.out(f"{data["trackcount"]} tracks found:")
     if is_playlist:
-        logger.out(f"{"\n".join(f"   {track["title"]}" for track in data['tracks'])}")
+        logger.out(f"{"\n".join(f"   {index}. {track["title"]} - {track["videoId"]}" for index, track in enumerate(data['tracks']))}")
     else:
         logger.out(f"{"\n".join(f"   {track["trackNumber"]}. {track["title"]}" for track in data['tracks'])}")
 
@@ -178,11 +187,32 @@ def save_album_cover(cover, artist, album, dir, logger : Logger = Logger()):
             logger.out("Cover Saved...")
         except: pass
 
-def sanitise(s):
-    if not s: return "Unknown"
+def sanitise(s : str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', s).strip()
 
-def download_track(track, data, config, cover_data, logger : Logger = Logger()):
+def url_ready(s : str) -> str:
+    return re.sub(r'[\"&/⧸#?:]', '', s.replace(" ", "+"))
+
+def download_lyrics(track, artist_string, final_file_path, logger : Logger = Logger()):
+    lrc_path = re.sub(r'\.mp3$', '.lrc', str(final_file_path))
+    if os.path.exists(lrc_path):
+        logger.out(f"Lyrics: {lrc_path} already exists...")
+    else:
+        logger.out(f"Downloading Lyrics: {lrc_path}")
+        url = f"https://lrclib.net/api/get?artist_name={url_ready(artist_string)}&track_name={url_ready(track["title"])}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("instrumental", False):
+                with open(lrc_path, "w", encoding="utf-8") as f:
+                    f.write("[00:00.00]♫")
+            else:
+                lyrics = data.get("syncedLyrics") or data.get("plainLyrics")
+                with open(lrc_path, "w", encoding="utf-8") as f:
+                    f.write(lyrics)
+
+def download_track(track, data, config, cover_data, logger : Logger = Logger()) -> tuple[str, Path, str]:
+    v_id : str = str(track["videoId"])
     local_yt_dlp = os.path.join(os.getcwd(), "yt-dlp.exe")
     temp_path = Path(config["temp_dir"])
     final_album_dir = Path(config["out_dir"]) / f"{sanitise(data['artist'])} - {sanitise(data['title'])}"
@@ -190,7 +220,7 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()):
     artist_string = ", ".join(track['artists'])
     artist_tag_string = "; ".join(track['artists'])
     
-    temp_filename = f"{track['videoId']}.mp3"
+    temp_filename = f"{v_id}.mp3"
     temp_file_path = temp_path / temp_filename
     
     final_filename = f"{sanitise(str(track['trackNumber']))}. {sanitise(artist_string)} - {sanitise(track['title'])}.mp3"
@@ -198,53 +228,57 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()):
 
     if final_file_path.exists():
         logger.out(f"Skipping (Exists): {track['title']}")
-        return
+        # return v_id, final_file_path, track['trackNumber']
+    else:
+        cmd = [
+            str(local_yt_dlp),
+            "-x", "--audio-quality", "0",
+            "--no-check-certificates",
+            "-f", 'ba[acodec^=mp3]/ba/b',
+            "--audio-format", "mp3",
+            "--ffmpeg-location", os.getcwd(),
+            "-o", os.path.join(temp_path, f"{track['videoId']}.%(ext)s"),
+            f"https://www.youtube.com/watch?v={v_id}",
+        ]
 
-    cmd = [
-        str(local_yt_dlp),
-        "-x", "--audio-quality", "0",
-        "--no-check-certificates",
-        "-f", 'ba[acodec^=mp3]/ba/b',
-        "--audio-format", "mp3",
-        "--ffmpeg-location", os.getcwd(),
-        "-o", os.path.join(temp_path, f"{track['videoId']}.%(ext)s"),
-        f"https://www.youtube.com/watch?v={track['videoId']}",
-    ]
-
-    startup_info = None
-    if os.name == "nt":
-        startup_info = subprocess.STARTUPINFO()
-        startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-    try:
-        logger.out(f"Downloading: {track['title']}")
-        subprocess.run(cmd,  stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, startupinfo=startup_info)
-        logger.out(f"Tagging: {track['title']}")
+        startup_info = None
+        if os.name == "nt":
+            startup_info = subprocess.STARTUPINFO()
+            startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
         try:
-            audio = MP3(temp_file_path)
-            if audio.tags is None:
-                audio.add_tags()            
-            audio.tags.delall("APIC")
-            audio.tags.add(TIT2(encoding=3, text=track["title"]))
-            audio.tags.add(TPE1(encoding=3, text=artist_tag_string))
-            audio.tags.add(TPE2(encoding=3, text=artist_string))
-            audio.tags.add(TALB(encoding=3, text=data["title"]))
-            audio.tags.add(TDRC(encoding=3, text=str(data["year"])))
-            audio.tags.add(TYER(encoding=3, text=str(data["year"])))
-            audio.tags.add(TRCK(encoding=3, text=str(track["trackNumber"])))
-            if cover_data:
-                audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='', data=cover_data))
-            audio.save(v2_version=3)
+            logger.out(f"Downloading: {track['title']}")
+            subprocess.run(cmd,  stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, startupinfo=startup_info)
+            logger.out(f"Tagging: {track['title']}")
+
+            try:
+                audio = MP3(temp_file_path)
+                if audio.tags is None:
+                    audio.add_tags()            
+                audio.tags.delall("APIC")
+                audio.tags.add(TIT2(encoding=3, text=track["title"]))
+                audio.tags.add(TPE1(encoding=3, text=artist_tag_string))
+                audio.tags.add(TPE2(encoding=3, text=artist_string))
+                audio.tags.add(TALB(encoding=3, text=data["title"]))
+                audio.tags.add(TDRC(encoding=3, text=str(data["year"])))
+                audio.tags.add(TYER(encoding=3, text=str(data["year"])))
+                audio.tags.add(TRCK(encoding=3, text=str(track["trackNumber"])))
+                if cover_data:
+                    audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='', data=cover_data))
+                audio.save(v2_version=3)
+            except Exception as e:
+                logger.out(f"Tagging Error on {track['title']}: {e}")
+            shutil.move(temp_file_path, final_file_path)
+
         except Exception as e:
-            logger.out(f"Tagging Error on {track['title']}: {e}")
-        shutil.move(temp_file_path, final_file_path)
-        logger.out(f"Finished: {track['title']}")
+            logger.out(f"Error processing {track['title']}: {e}")
 
-        return track["videoId"], track["duration_seconds"], final_file_path
-
-    except Exception as e:
-        logger.out(f"Error processing {track['title']}: {e}")
+    if config["download_lyrics"]:
+        download_lyrics(track, artist_string, final_file_path, logger)
+        
+    logger.out(f"Finished: {track['title']}")
+            
+    return v_id, final_file_path, track['trackNumber']
 
 def download_album(data, config, logger : Logger = Logger(), cover_data=None):
     out_path = Path(config["out_dir"])
@@ -275,7 +309,7 @@ def download_album(data, config, logger : Logger = Logger(), cover_data=None):
 
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING ALBUM")
 
-def download_playlist_album(album_id, p_data, config, playlist_file, logger = Logger()):
+def download_playlist_album(album_id, p_data, config, logger = Logger()):
     global playlist_write_index
     album_data = scrape_data("", logger=logger, album_id=album_id)
 
@@ -286,26 +320,22 @@ def download_playlist_album(album_id, p_data, config, playlist_file, logger = Lo
     final_album_dir.mkdir(parents=True, exist_ok=True)
 
     logger.out(f"Starting Download: {album_data['artist']} - {album_data['title']}")
-    if cover_data is None: cover_data = get_album_cover(album_data["cover"])
+    cover_data = get_album_cover(album_data["cover"])
     save_album_cover(cover_data, album_data["artist"], album_data["title"], cover_path, logger)
 
+    playlsit_strings : list[str] = []
     with ThreadPoolExecutor(max_workers=12) as executor:
-        futures = {executor.submit(download_track, track, album_data, config, cover_data, logger): track for track in album_data["tracks"]}
-        for future in as_completed(futures):
-            video_id, final_file_path = futures[future]
-
+        r = executor.map(lambda track: download_track(track, album_data, config, cover_data, logger), album_data["tracks"])
+        for video_id, final_file_path, trackNum in r:
+            logger.out(f"{video_id} - {final_file_path}")
             if video_id in p_data["videoIds"]:
-                # add to playlsit file
                 with file_lock:
                     playlsit_string = f"File{playlist_write_index}={final_file_path}"
-                    try:
-                        playlist_file.write(playlsit_string)
-                        playlist_file.flush()
-                        playlist_write_index += 1
-                    except:
-                        pass
+                    playlist_write_index += 1
+                playlsit_strings.append(playlsit_string)
 
-
+    logger.out(str(playlsit_strings))
+    return playlsit_strings
 
 def download_playlist(p_data, config, logger = Logger()):
     global playlist_write_index
@@ -324,18 +354,24 @@ def download_playlist(p_data, config, logger = Logger()):
         try: f.unlink()
         except: pass
 
+    playlsit_lines : list[str] = []
+
     start_timer()
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        r = executor.map(lambda album_id: download_playlist_album(album_id, p_data, config, logger), p_data["albumId_cache"])
+        for strings in r:
+            playlsit_lines.extend(strings)
+
     with open(playlsit_file_path, "w") as playlist_file:
-        playlist_file.write("[playlist]")
-        playlist_file.flush()
+        playlist_file.write("[playlist]\n")
+        playlist_file.writelines(playlsit_lines)
+        playlist_file.write("Version=2\n")
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            executor.map(lambda album_id: download_playlist_album(album_id, p_data, config, playlist_file, logger), p_data["albumId_cache"])
 
-        playlist_file.write("Version=2")
-        playlist_file.flush()
     stop_timer(logger=logger)
+
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING PLAYLIST")
+    logger.out(str(playlsit_lines))
 
     
 
@@ -360,7 +396,7 @@ class Worker(QThread):
 
             if not self.data_only:
                 if data["type"] == "playlist":
-                    download_playlist(data, self.config, logger=logger)
+                    download_playlist(p_data=data, config=self.config, logger=logger)
                 else:
                     download_album(data, self.config, logger=logger, cover_data=cover_data)
 
@@ -431,6 +467,11 @@ class MusicDownloaderGUI(QWidget):
         self.num_threads_input.setValue(int(self.config.get("max_threads", 4)))
         self.num_threads_input.setFixedWidth(100)
         form_layout.addRow("Max Threads:", self.num_threads_input)
+
+        self.lyrics_checkbox = QCheckBox()
+        self.lyrics_checkbox.setChecked(True)
+        self.lyrics_checkbox.setFixedWidth(100)
+        form_layout.addRow("Download Lyrics:", self.lyrics_checkbox)
 
         left_layout.addLayout(form_layout)
 
@@ -545,6 +586,7 @@ class MusicDownloaderGUI(QWidget):
         config["max_threads"] = self.num_threads_input.value()
 
         self.btn_fetch_data.setEnabled(False)
+        self.lyrics_checkbox.setEnabled(False)
 
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Downloading...")
@@ -560,6 +602,7 @@ class MusicDownloaderGUI(QWidget):
         self.worker.start()
 
     def on_finished(self):
+        self.lyrics_checkbox.setEnabled(True)
         self.btn_fetch_data.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.start_btn.setText("Start Download")
