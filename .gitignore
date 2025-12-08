@@ -5,3 +5,4 @@ covers/
 dist/
 build/
 MusicDownloader.spec
+build.txt

@@ -23,7 +23,7 @@ from PIL import Image
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, 
     QVBoxLayout, QFormLayout, QHBoxLayout, QTextEdit, 
-    QFileDialog, QSpinBox, QCheckBox, QListWidget, QListWidgetItem
+    QFileDialog, QSpinBox, QCheckBox, QListWidget, QListWidgetItem, QSizePolicy
 )
 from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtCore import Qt, QThread, Signal
@@ -574,10 +574,10 @@ class MusicDownloaderGUI(QWidget):
         self.single_url_input = QLineEdit()
         self.single_url_input.setPlaceholderText("Paste URL here...")
         # self.single_url_input.textChanged.connect(self.reset_data)
-        
         self.batch_url_input = QTextEdit()
         self.batch_url_input.setPlaceholderText("Paste URLs here (one per line)...")
         self.batch_url_input.setFixedHeight(100)
+        self.batch_url_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.batch_url_input.setVisible(False)
 
         self.btn_fetch_data = QPushButton("Fetch Data")
@@ -594,7 +594,6 @@ class MusicDownloaderGUI(QWidget):
         
         form_layout.addRow("URL:", input_row_layout)
 
-        # --- Standard Paths ---
         self.out_input = QLineEdit(self.config["out_dir"])
         self.btn_browse_out = QPushButton("...")
         self.btn_browse_out.clicked.connect(lambda: self.browse_folder(self.out_input))
@@ -765,6 +764,7 @@ class MusicDownloaderGUI(QWidget):
         self.artist_albums_checkbox.setEnabled(False)
         self.batch_mode_checkbox.setEnabled(False)
         self.start_btn.setEnabled(False)
+        self.btn_clear_data.setEnabled(False)
         self.start_btn.setText("Processing...")
         
         if not final_data:
@@ -847,6 +847,7 @@ class MusicDownloaderGUI(QWidget):
         self.start_btn.setEnabled(True)
         self.artist_albums_checkbox.setEnabled(True)
         self.batch_mode_checkbox.setEnabled(True)
+        self.btn_clear_data.setEnabled(True)
         self.start_btn.setText("Start Download")
 
     def browse_folder(self, line_edit):
