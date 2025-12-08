@@ -132,7 +132,7 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
         singles_data = data.get("singles", {}).get("results", [])
         data_albums = (
             [{key: album[key] for key in ["browseId", "title", "type"]} for album in album_data] 
-            # + [{"browseId": s["browseId"], "title": s["title"], "type": s["year"]} for s in singles_data]
+            + [{"browseId": s["browseId"], "title": s["title"], "type": s["year"]} for s in singles_data]
         )
         data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", data.get('thumbnails')[0]['url'])
 
