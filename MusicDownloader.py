@@ -59,6 +59,7 @@ def load_config():
         "starting_index": 0,
         "max_threads": 32,
         "download_lyrics": True,
+        "artist_album_only": True,
     }
 
     config_path = Path(os.path.join(os.getcwd(), "MusicDownloader.cfg"))
@@ -81,7 +82,7 @@ def load_config():
             print(f"Config Error: {e}")
     return settings
 
-def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
+def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, config = {}):
     is_playlist = False
     r_is_artist = False
     data = None
@@ -133,7 +134,10 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
     elif r_is_artist:
         data_artist = data["name"]
         album_data = data.get("albums", {}).get("results", [])
-        singles_data = data.get("singles", {}).get("results", [])
+
+        singles_data = [] if config["artist_album_only"] else data.get("singles", {}).get("results", [])
+        logger.out(str(config["artist_album_only"]))
+        
         data_albums = (
             [{key: album[key] for key in ["browseId", "title", "type"]} for album in album_data] 
             + [{"browseId": s["browseId"], "title": s["title"], "type": s["year"]} for s in singles_data]
@@ -461,7 +465,7 @@ class Worker(QThread):
 
     def run(self):
         logger = Logger(logger=self.log_signal.emit)
-        data = scrape_data(self.url, logger=logger)
+        data = scrape_data(self.url, logger=logger, config=self.config)
         if data:
             cover_data = get_album_cover(data["cover"], logger=logger)
             self.data_signal.emit(data, cover_data if cover_data else b'')
@@ -473,6 +477,7 @@ class Worker(QThread):
                     download_artist(artist_data=data, config=self.config, logger=logger)
                 else:
                     download_album(data, self.config, logger=logger, cover_data=cover_data)
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
         self.finished_signal.emit()
 
@@ -543,9 +548,17 @@ class MusicDownloaderGUI(QWidget):
         form_layout.addRow("Max Threads:", self.num_threads_input)
 
         self.lyrics_checkbox = QCheckBox()
-        self.lyrics_checkbox.setChecked(True)
+        self.lyrics_checkbox.setChecked(self.config["download_lyrics"])
         self.lyrics_checkbox.setFixedWidth(100)
         form_layout.addRow("Download Lyrics:", self.lyrics_checkbox)
+
+        self.artist_albums_checkbox = QCheckBox()
+        self.artist_albums_checkbox.setChecked(self.config["artist_album_only"])
+        container_layout = QHBoxLayout()
+        container_layout.addWidget(QLabel("[ARTISTS] Download ONLY albums:"))
+        container_layout.addWidget(self.artist_albums_checkbox)
+        container_layout.addStretch()
+        form_layout.addRow(container_layout)
 
         left_layout.addLayout(form_layout)
 
@@ -640,12 +653,24 @@ class MusicDownloaderGUI(QWidget):
             self.cover_label.setPixmap(pixmap.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.cover_label.setText("No Cover Found")
+
+    def parse_config(self):
+        config = self.config.copy()
+        config["out_dir"] = self.out_input.text()
+        config["temp_dir"] = self.temp_input.text()
+        config["cover_dir"] = self.cover_input.text()
+        config["max_threads"] = self.num_threads_input.value()
+        config["download_lyrics"] = self.lyrics_checkbox.isChecked()
+        config["artist_album_only"] = self.artist_albums_checkbox.isChecked()
+        return config
     
     def fetch_data(self):
         url = self.url_input.text().strip()
         if not url:
             self.log_to_console("Error: Please enter a URL.")
             return
+        
+        config = self.parse_config()
         
         self.btn_fetch_data.setEnabled(False)
         self.console.clear()
@@ -662,14 +687,11 @@ class MusicDownloaderGUI(QWidget):
             self.log_to_console("Error: Please enter a URL.")
             return
 
-        config = self.config.copy()
-        config["out_dir"] = self.out_input.text()
-        config["temp_dir"] = self.temp_input.text()
-        config["cover_dir"] = self.cover_input.text()
-        config["max_threads"] = self.num_threads_input.value()
+        config = self.parse_config()
 
         self.btn_fetch_data.setEnabled(False)
         self.lyrics_checkbox.setEnabled(False)
+        self.artist_albums_checkbox.setEnabled(False)
 
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Downloading...")
@@ -688,9 +710,9 @@ class MusicDownloaderGUI(QWidget):
         self.lyrics_checkbox.setEnabled(True)
         self.btn_fetch_data.setEnabled(True)
         self.start_btn.setEnabled(True)
+        self.artist_albums_checkbox.setEnabled(True)
         self.start_btn.setText("Start Download")
 
-        winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -705,7 +727,7 @@ if __name__ == "__main__":
 
     if args.ytb_url:
         logger = Logger(print if args.verbose else None)
-        data = scrape_data(args.ytb_url, logger=logger)
+        data = scrape_data(args.ytb_url, logger=logger, config=config)
         if data:
             if args.verbose: print(f"Downloading: {data["artist"]} - {data["album"]}...")
             download_album(data, config, logger=logger)
