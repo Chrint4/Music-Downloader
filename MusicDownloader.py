@@ -67,12 +67,16 @@ def load_config():
             config = ConfigParser()
             config.read(config_path)
             if 'Settings' in config:
+                def clean_path(path_str):
+                    cleaned = path_str.strip('"').strip("'")
+                    return os.path.expanduser(os.path.expandvars(cleaned))
+
                 if 'out_dir' in config['Settings']:
-                    settings['out_dir'] = config['Settings']['out_dir'].strip('"').strip("'")
+                    settings['out_dir'] = clean_path(config['Settings']['out_dir'])
                 if 'cover_dir' in config['Settings']:
-                    settings['cover_dir'] = config['Settings']['cover_dir'].strip('"').strip("'")
+                    settings['cover_dir'] = clean_path(config['Settings']['cover_dir'])
                 if 'temp_dir' in config['Settings']:
-                    settings['temp_dir'] = config['Settings']['temp_dir'].strip('"').strip("'")
+                    settings['temp_dir'] = clean_path(config['Settings']['temp_dir'])
         except Exception as e:
             print(f"Config Error: {e}")
     return settings
