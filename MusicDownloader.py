@@ -104,14 +104,13 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
             if r_is_album_OLAK:
                 album_id = yt.get_album_browse_id(album_id)
             data = yt.get_album(album_id)
-            # print(json.dumps(data, indent= 2))
         elif r_is_playlist:
             is_playlist = True
             playlist_id = r_is_playlist.group(1)
             data = yt.get_playlist(playlist_id)
         elif r_is_artist:
             artist_id = r_is_artist.group(1)
-            logger.out(artist_id)
+            logger.out(f"Fetching Artist: {artist_id}")
             data = yt.get_artist(artist_id)
         else:
             logger.out("ERROR: CANT PARSE URL")
@@ -138,16 +137,40 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
 
     elif r_is_artist:
         data_artist = data["name"]
-        album_data = data.get("albums", {}).get("results", [])
-
-        singles_data = [] if config["artist_album_only"] else data.get("singles", {}).get("results", [])
-        logger.out(str(config["artist_album_only"]))
         
-        data_albums = (
-            [{key: album[key] for key in ["browseId", "title", "type"]} for album in album_data] 
-            + [{"browseId": s["browseId"], "title": s["title"], "type": s["year"]} for s in singles_data]
-        )
-        data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", data.get('thumbnails')[0]['url'])
+        def fetch_full_list(section_key):
+            section = data.get(section_key)
+            if not section: return []
+            if 'browseId' in section:
+                logger.out(f"Fetching full list for: {section_key}...")
+                try:
+                    return yt.get_artist_albums(section['browseId'], section.get('params'))
+                except Exception as e:
+                    logger.out(f"Error fetching {section_key}: {e}")
+                    return section.get('results', [])
+            return section.get('results', [])
+
+        full_albums = fetch_full_list("albums")
+        full_singles = []
+        if not config.get("artist_album_only", False):
+            full_singles = fetch_full_list("singles")
+            full_eps = fetch_full_list("ep")
+            full_singles.extend(full_eps)
+
+        logger.out(f"Processing {len(full_albums)} albums and {len(full_singles)} singles/EPs...")
+        
+        all_items = full_albums + full_singles
+        data_albums = []
+        for item in all_items:
+            data_albums.append({
+                "browseId": item["browseId"],
+                "title": item.get("title", "Unknown Title"),
+                "type": item.get("year", "Album")
+            })
+
+        data_cover_url = ""
+        if 'thumbnails' in data and data['thumbnails']:
+             data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", data['thumbnails'][0]['url'])
 
         data = {
             'url': url,
@@ -158,16 +181,16 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
         data["albumCount"] = len(data_albums)
         data["type"] = "artist"
 
-        logger.out(f"Found: {data["artist"]}")
-        logger.out(f"{data["albumCount"]} albums:")
-        logger.out(f"{"\n".join(f"   {index}. {album["browseId"]} {album["title"]} - {album["type"]}" for index, album in enumerate(data["albums"]))}")
+        logger.out(f"Found: {data['artist']}")
+        logger.out(f"{data['albumCount']} releases found.")
+        logger.out(f"\n".join(f"   {i}. {alb['title']}" for i, alb in enumerate(data['albums'][:10])))
         
         return data
     else:
         data_title = data.get('title')
         data_artist = ", ".join([a['name'] for a in data.get("artists", [])])
         data_year = str(data.get('year'))
-        data_type = data.get('type').lower()
+        data_type = data.get('type', 'album').lower()
         data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", data.get('thumbnails')[0]['url'])
         data_track_count = data.get('trackCount')
         data_tracks = [{key: ([a['name'] for a in track.get("artists", [])] if key == "artists" else track[key]) for key in ["videoId", "title", "artists", "trackNumber", "duration_seconds"]} for track in data.get('tracks', [])]
@@ -189,11 +212,7 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
 
     logger.out(f"Found: {data['title']} - {data['artist']}")
     logger.out(f"Type: {data['type']}")
-    logger.out(f"{data["trackcount"]} tracks found:")
-    if is_playlist:
-        logger.out(f"{"\n".join(f"   {index}. {track["title"]} - {track["videoId"]}" for index, track in enumerate(data['tracks']))}")
-    else:
-        logger.out(f"{"\n".join(f"   {track["trackNumber"]}. {track["title"]}" for track in data['tracks'])}")
+    logger.out(f"{data['trackcount']} tracks found:")
 
     return data
 
@@ -621,6 +640,7 @@ class MusicDownloaderGUI(QWidget):
         self.num_threads_input = QSpinBox()
         self.num_threads_input.setRange(1, 128)
         self.num_threads_input.setValue(int(self.config.get("max_threads", 4)))
+        self.num_threads_input.setFixedWidth(80)
         form_layout.addRow("Max Threads:", self.num_threads_input)
 
         self.lyrics_checkbox = QCheckBox()
@@ -668,7 +688,7 @@ class MusicDownloaderGUI(QWidget):
         central_layout.addWidget(self.info_console)
 
         right_widget = QWidget()
-        right_widget.setFixedWidth(300)
+        right_widget.setFixedWidth(400)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -798,7 +818,7 @@ class MusicDownloaderGUI(QWidget):
             
             info_text = (
                 f"<span style='{style_key}'>Artist:</span> <span style='{style_val}'>{data.get('artist', 'Unknown')}</span><br>"
-                f"<span style='{style_key}'>Albums:</span> <span style='{style_val}'>{data.get('albumCount', 0)}</span>"
+                f"<span style='{style_key}'>Items:</span> <span style='{style_val}'>{data.get('albumCount', 0)}</span>"
                 f"<div style='margin-left: 1em;'>{list_html}</div>"
             )
 
