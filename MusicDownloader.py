@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 # import json
+from copy import deepcopy
 import winsound
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from configparser import ConfigParser
@@ -19,7 +20,11 @@ from mutagen.id3 import TIT2, TPE1, TPE2, TALB, TDRC, TRCK, APIC, TYER
 from ytmusicapi import YTMusic
 from PIL import Image
 
-from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton, QVBoxLayout, QFormLayout, QHBoxLayout, QTextEdit, QFileDialog, QSpinBox, QCheckBox)
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QLineEdit, QPushButton, 
+    QVBoxLayout, QFormLayout, QHBoxLayout, QTextEdit, 
+    QFileDialog, QSpinBox, QCheckBox, QListWidget, QListWidgetItem
+)
 from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtCore import Qt, QThread, Signal
 
@@ -465,6 +470,7 @@ class Worker(QThread):
 
     def run(self):
         logger = Logger(logger=self.log_signal.emit)
+
         data = scrape_data(self.url, logger=logger, config=self.config)
         if data:
             cover_data = get_album_cover(data["cover"], logger=logger)
@@ -481,13 +487,66 @@ class Worker(QThread):
 
         self.finished_signal.emit()
 
+class Worker(QThread):
+    log_signal = Signal(str)
+    finished_signal = Signal()
+    data_signal = Signal(dict, bytes)
+
+    def __init__(self, urls, config, data_only=False, direct_data=None):
+        super().__init__()
+        self.urls = urls if isinstance(urls, list) else [urls]
+        self.config = config
+        self.data_only = data_only
+        self.direct_data = direct_data
+
+    def run(self):
+        logger = Logger(logger=self.log_signal.emit)
+        
+        if self.direct_data:
+            logger.out("Processing selected items...")
+            data = self.direct_data
+            
+            self.data_signal.emit(data, b'') 
+
+            if not self.data_only:
+                if data["type"] == "playlist":
+                    download_playlist(p_data=data, config=self.config, logger=logger)
+                elif data["type"] == "artist":
+                    download_artist(artist_data=data, config=self.config, logger=logger)
+                else:
+                    download_album(data, self.config, logger=logger)
+        else:
+            for i, url in enumerate(self.urls):
+                if not url.strip(): continue
+                if len(self.urls) > 1:
+                    logger.out(f"{'='*10}\nProcessing URL {i+1}/{len(self.urls)}")
+                
+                data = scrape_data(url, logger=logger, config=self.config)
+                    
+                if data:
+                    cover_data = get_album_cover(data["cover"], logger=logger)
+                    self.data_signal.emit(data, cover_data if cover_data else b'')
+                    if not self.data_only:
+                        if data["type"] == "playlist":
+                            download_playlist(p_data=data, config=self.config, logger=logger)
+                        elif data["type"] == "artist":
+                            download_artist(artist_data=data, config=self.config, logger=logger)
+                        else:
+                            download_album(data, self.config, logger=logger, cover_data=cover_data)
+                else:
+                    logger.out(f"Skipping Invalid URL: {url}")
+
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        self.finished_signal.emit()
+
 class MusicDownloaderGUI(QWidget):
     def __init__(self, config):
         super().__init__()
         self.setWindowTitle("Music Downloader")
-        self.resize(900,600)
+        self.resize(1400, 700)
 
         self.config = config
+        self.current_fetched_data = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -499,57 +558,74 @@ class MusicDownloaderGUI(QWidget):
 
         form_layout = QFormLayout()
 
-        #url
-        self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Paste URL here...")
+        self.batch_mode_checkbox = QCheckBox("Batch Mode")
+        self.batch_mode_checkbox.toggled.connect(self.toggle_mode)
+        
+        self.btn_clear_data = QPushButton("Clear Data")
+        self.btn_clear_data.setFixedWidth(80)
+        self.btn_clear_data.clicked.connect(lambda: self.reset_data())
+
+        batch_clear_widget = QHBoxLayout()
+        batch_clear_widget.addWidget(self.batch_mode_checkbox)
+        batch_clear_widget.addWidget(self.btn_clear_data)
+
+        form_layout.addRow(batch_clear_widget)
+
+        self.single_url_input = QLineEdit()
+        self.single_url_input.setPlaceholderText("Paste URL here...")
+        # self.single_url_input.textChanged.connect(self.reset_data)
+        
+        self.batch_url_input = QTextEdit()
+        self.batch_url_input.setPlaceholderText("Paste URLs here (one per line)...")
+        self.batch_url_input.setFixedHeight(100)
+        self.batch_url_input.setVisible(False)
+
         self.btn_fetch_data = QPushButton("Fetch Data")
         self.btn_fetch_data.setFixedWidth(80)
         self.btn_fetch_data.clicked.connect(lambda: self.fetch_data())
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(self.url_input)
-        url_layout.addWidget(self.btn_fetch_data)
-        form_layout.addRow("URL:", url_layout)
+        
+        url_container = QVBoxLayout()
+        url_container.addWidget(self.single_url_input)
+        url_container.addWidget(self.batch_url_input)
 
-        #out path
+        input_row_layout = QHBoxLayout()
+        input_row_layout.addLayout(url_container)
+        input_row_layout.addWidget(self.btn_fetch_data)
+        
+        form_layout.addRow("URL:", input_row_layout)
+
+        # --- Standard Paths ---
         self.out_input = QLineEdit(self.config["out_dir"])
         self.btn_browse_out = QPushButton("...")
-        self.btn_browse_out.setFixedWidth(30)
         self.btn_browse_out.clicked.connect(lambda: self.browse_folder(self.out_input))
         out_layout = QHBoxLayout()
         out_layout.addWidget(self.out_input)
         out_layout.addWidget(self.btn_browse_out)
         form_layout.addRow("Output Path:", out_layout)
 
-        #temp path
         self.temp_input = QLineEdit(self.config["temp_dir"])
         self.btn_browse_temp = QPushButton("...")
-        self.btn_browse_temp.setFixedWidth(30)
         self.btn_browse_temp.clicked.connect(lambda: self.browse_folder(self.temp_input))
         temp_layout = QHBoxLayout()
         temp_layout.addWidget(self.temp_input)
         temp_layout.addWidget(self.btn_browse_temp)
         form_layout.addRow("Temp Path:", temp_layout)
 
-        #cover path
         self.cover_input = QLineEdit(self.config["cover_dir"])
         self.btn_browse_cover = QPushButton("...")
-        self.btn_browse_cover.setFixedWidth(30)
         self.btn_browse_cover.clicked.connect(lambda: self.browse_folder(self.cover_input))
         cover_layout = QHBoxLayout()
         cover_layout.addWidget(self.cover_input)
         cover_layout.addWidget(self.btn_browse_cover)
         form_layout.addRow("Cover Path:", cover_layout)
 
-        #threads
         self.num_threads_input = QSpinBox()
         self.num_threads_input.setRange(1, 128)
         self.num_threads_input.setValue(int(self.config.get("max_threads", 4)))
-        self.num_threads_input.setFixedWidth(100)
         form_layout.addRow("Max Threads:", self.num_threads_input)
 
         self.lyrics_checkbox = QCheckBox()
         self.lyrics_checkbox.setChecked(self.config["download_lyrics"])
-        self.lyrics_checkbox.setFixedWidth(100)
         form_layout.addRow("Download Lyrics:", self.lyrics_checkbox)
 
         self.artist_albums_checkbox = QCheckBox()
@@ -562,13 +638,11 @@ class MusicDownloaderGUI(QWidget):
 
         left_layout.addLayout(form_layout)
 
-        #start button
         self.start_btn = QPushButton("Start Download")
         self.start_btn.setMinimumHeight(40)
         self.start_btn.clicked.connect(self.start_process)
         left_layout.addWidget(self.start_btn)
 
-        #console
         self.console_label = QLabel("Console Output:")
         left_layout.addWidget(self.console_label)
         self.console = QTextEdit()
@@ -576,49 +650,150 @@ class MusicDownloaderGUI(QWidget):
         self.console.setStyleSheet("background-color: #222; color: #EEE; font-family: Consolas, monospace;")
         left_layout.addWidget(self.console)
 
-        right_widget = QWidget()
-        right_widget.setFixedWidth(320)
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(10, 0, 0, 0)
+        central_widget = QWidget()
+        central_widget.setFixedWidth(320)
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(10, 0, 0, 0)
 
-        #cover image
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(300, 300)
         self.cover_label.setStyleSheet("background-color: #333; border: 1px solid #555;")
         self.cover_label.setAlignment(Qt.AlignCenter)
         self.cover_label.setText("No Cover")
-        right_layout.addWidget(self.cover_label)
+        central_layout.addWidget(self.cover_label)
 
         self.info_console = QTextEdit()
         self.info_console.setReadOnly(True)
         self.info_console.setStyleSheet("background-color: #222; color: #EEE; font-family: Consolas, monospace;")
         self.info_console.setFixedWidth(300)
-        right_layout.addWidget(self.info_console, 1)
+        central_layout.addWidget(self.info_console)
+
+        right_widget = QWidget()
+        right_widget.setFixedWidth(300)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         
-        right_layout.addStretch()
+        self.selection_label = QLabel("Select Items to Download:")
+        right_layout.addWidget(self.selection_label)
+
+        self.item_list = QListWidget()
+        self.item_list.setStyleSheet("background-color: #222; color: #EEE;")
+        right_layout.addWidget(self.item_list)
 
         main_layout.addWidget(left_widget, 1) 
+        main_layout.addWidget(central_widget, 0)
         main_layout.addWidget(right_widget, 0)
 
-    def browse_folder(self, line_edit):
-        folder = QFileDialog.getExistingDirectory(self, "Select Directory", line_edit.text())
-        if folder:
-            line_edit.setText(folder)
+    def reset_data(self):
+        self.current_fetched_data = None
+        self.item_list.clear()
+        self.console.clear()
+        self.cover_label.clear()
+        self.cover_label.setText("No Cover")
+        self.info_console.clear()
 
-    def log_to_console(self, text):
-        self.console.append(text)
-        sb = self.console.verticalScrollBar()
-        sb.setValue(sb.maximum())
+    def toggle_mode(self, checked):
+        if checked:
+            self.single_url_input.setVisible(False)
+            self.btn_fetch_data.setVisible(False)
+            self.batch_url_input.setVisible(True)
+            self.item_list.setEnabled(False)
+            self.selection_label.setEnabled(False)
+        else:
+            self.single_url_input.setVisible(True)
+            self.btn_fetch_data.setVisible(True)
+            self.batch_url_input.setVisible(False)
+            self.item_list.setEnabled(True)
+            self.selection_label.setEnabled(True)
+
+    def get_urls(self):
+        if self.batch_mode_checkbox.isChecked():
+            text = self.batch_url_input.toPlainText()
+            return [line.strip() for line in text.splitlines() if line.strip()]
+        else:
+            url = self.single_url_input.text().strip()
+            return [url] if url else []
+
+    def fetch_data(self):
+        urls = self.get_urls()
+        if not urls:
+            self.log_to_console("Error: Please enter a URL.")
+            return
+        
+        config = self.parse_config()
+        self.btn_fetch_data.setEnabled(False)
+        self.console.clear()
+        self.item_list.clear()
+        
+        self.worker = Worker(urls, config, data_only=True)
+        self.worker.log_signal.connect(self.log_to_console)
+        self.worker.data_signal.connect(self.update_info_panel)
+        self.worker.finished_signal.connect(self.on_finished)
+        self.worker.start()
+
+    def start_process(self):
+        urls = self.get_urls()
+        if not urls:
+            self.log_to_console("Error: Please enter a URL.")
+            return
+
+        config = self.parse_config()
+        
+        final_data = None
+        if not self.batch_mode_checkbox.isChecked() and self.current_fetched_data:
+            final_data = deepcopy(self.current_fetched_data)
+            
+            checked_ids = set()
+            for i in range(self.item_list.count()):
+                item = self.item_list.item(i)
+                if item.checkState() == Qt.Checked:
+                    checked_ids.add(item.data(Qt.UserRole))
+            
+            if final_data["type"] == "artist":
+                original_len = len(final_data["albums"])
+                final_data["albums"] = [a for a in final_data["albums"] if a["browseId"] in checked_ids]
+                self.log_to_console(f"Filtered: {len(final_data['albums'])} / {original_len} albums selected.")
+            else:
+                original_len = len(final_data["tracks"])
+                final_data["tracks"] = [t for t in final_data["tracks"] if t.get("videoId") in checked_ids]
+                if "videoIds" in final_data:
+                    final_data["videoIds"] = [v for v in final_data["videoIds"] if v in checked_ids]
+                self.log_to_console(f"Filtered: {len(final_data['tracks'])} / {original_len} tracks selected.")
+
+        self.btn_fetch_data.setEnabled(False)
+        self.lyrics_checkbox.setEnabled(False)
+        self.artist_albums_checkbox.setEnabled(False)
+        self.batch_mode_checkbox.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("Processing...")
+        
+        if not final_data:
+            self.console.clear()
+            self.cover_label.clear()
+            self.cover_label.setText("Loading...")
+
+        self.worker = Worker(urls, config, direct_data=final_data)
+        self.worker.log_signal.connect(self.log_to_console)
+
+        if not final_data:
+            self.worker.data_signal.connect(self.update_info_panel)
+            
+        self.worker.finished_signal.connect(self.on_finished)
+        self.worker.start()
 
     def update_info_panel(self, data, cover_data):
+        self.current_fetched_data = data
+        
         style_key = "font-weight: bold; color: #FFD700;" 
         style_val = "color: #FFFFFF;"
-
+        
+        info_text = ""
+        self.item_list.clear()
 
         if data["type"] == "artist":
             list_html = "<br>".join(
                 f"<span style='font-weight: bold; color: #FFFFFF;'>{i}. </span>"
-                f"<span style='color: #FFFFFF;'>{album["title"]} - {album["type"]}</span>"
+                f"<span style='color: #FFFFFF;'>{album['title']} - {album['type']}</span>"
                 for i, album in enumerate(data["albums"]))
             
             info_text = (
@@ -626,6 +801,13 @@ class MusicDownloaderGUI(QWidget):
                 f"<span style='{style_key}'>Albums:</span> <span style='{style_val}'>{data.get('albumCount', 0)}</span>"
                 f"<div style='margin-left: 1em;'>{list_html}</div>"
             )
+
+            for album in data["albums"]:
+                item = QListWidgetItem(f"{album['title']} ({album['type']})")
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                item.setData(Qt.UserRole, album['browseId'])
+                self.item_list.addItem(item)
         else:
             list_html = "<br>".join(
                 f"<span style='font-weight: bold; color: #FFFFFF;'>{track['trackNumber']}. </span>"
@@ -642,10 +824,15 @@ class MusicDownloaderGUI(QWidget):
                 f"<span style='{style_key}'>Tracks:</span> <span style='{style_val}'>{data.get('trackcount', 0)}</span>"
                 f"<div style='margin-left: 1em;'>{list_html}</div>"
             )
-        
+
+            for track in data["tracks"]:
+                item = QListWidgetItem(f"{track['trackNumber']}. {track['title']}")
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                item.setData(Qt.UserRole, track.get('videoId'))
+                self.item_list.addItem(item)
+
         self.info_console.setHtml(info_text)
-        sb = self.console.verticalScrollBar()
-        sb.setValue(sb.minimum())
 
         if cover_data:
             pixmap = QPixmap()
@@ -653,6 +840,24 @@ class MusicDownloaderGUI(QWidget):
             self.cover_label.setPixmap(pixmap.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self.cover_label.setText("No Cover Found")
+
+    def on_finished(self):
+        self.lyrics_checkbox.setEnabled(True)
+        self.btn_fetch_data.setEnabled(True)
+        self.start_btn.setEnabled(True)
+        self.artist_albums_checkbox.setEnabled(True)
+        self.batch_mode_checkbox.setEnabled(True)
+        self.start_btn.setText("Start Download")
+
+    def browse_folder(self, line_edit):
+        folder = QFileDialog.getExistingDirectory(self, "Select Directory", line_edit.text())
+        if folder:
+            line_edit.setText(folder)
+
+    def log_to_console(self, text):
+        self.console.append(text)
+        sb = self.console.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def parse_config(self):
         config = self.config.copy()
@@ -663,56 +868,6 @@ class MusicDownloaderGUI(QWidget):
         config["download_lyrics"] = self.lyrics_checkbox.isChecked()
         config["artist_album_only"] = self.artist_albums_checkbox.isChecked()
         return config
-    
-    def fetch_data(self):
-        url = self.url_input.text().strip()
-        if not url:
-            self.log_to_console("Error: Please enter a URL.")
-            return
-        
-        config = self.parse_config()
-        
-        self.btn_fetch_data.setEnabled(False)
-        self.console.clear()
-        
-        self.worker = Worker(url, config, data_only=True)
-        self.worker.log_signal.connect(self.log_to_console)
-        self.worker.data_signal.connect(self.update_info_panel)
-        self.worker.finished_signal.connect(self.on_finished)
-        self.worker.start()
-
-    def start_process(self):
-        url = self.url_input.text().strip()
-        if not url:
-            self.log_to_console("Error: Please enter a URL.")
-            return
-
-        config = self.parse_config()
-
-        self.btn_fetch_data.setEnabled(False)
-        self.lyrics_checkbox.setEnabled(False)
-        self.artist_albums_checkbox.setEnabled(False)
-
-        self.start_btn.setEnabled(False)
-        self.start_btn.setText("Downloading...")
-        self.console.clear()
-
-        self.cover_label.clear()
-        self.cover_label.setText("Loading...")
-
-        self.worker = Worker(url, config)
-        self.worker.log_signal.connect(self.log_to_console)
-        self.worker.data_signal.connect(self.update_info_panel)
-        self.worker.finished_signal.connect(self.on_finished)
-        self.worker.start()
-
-    def on_finished(self):
-        self.lyrics_checkbox.setEnabled(True)
-        self.btn_fetch_data.setEnabled(True)
-        self.start_btn.setEnabled(True)
-        self.artist_albums_checkbox.setEnabled(True)
-        self.start_btn.setText("Start Download")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
