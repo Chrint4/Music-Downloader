@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import threading
 import time
+# import json
+import winsound
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from configparser import ConfigParser
 from pathlib import Path
@@ -31,10 +33,12 @@ class Logger():
     def __init__(self, logger = print):
         self.logger = logger
     
-    def out(self, s : str):
+    def out(self, s : str, also_print = False):
         if self.logger:
-            with log_lock: 
+            with log_lock:
                 self.logger(s)
+                if also_print and self.logger is not print:
+                    print(s)
 
 def start_timer():
     global start_time, end_time
@@ -75,6 +79,7 @@ def load_config():
 
 def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
     is_playlist = False
+    r_is_artist = False
     data = None
 
     if not album_id:
@@ -82,19 +87,22 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
         r_is_album_OLAK = re.search(r'list\=(OLAK5uy_.+)', url)
         r_is_album_MPRE = re.search(r'list\=(MPREb_.+)', url)
         r_is_playlist = re.search(r'list\=(PL.+)', url)
-
+        r_is_artist = re.search(r'channel/(UC.+)', url)
 
         if r_is_album_MPRE or r_is_album_OLAK:
             album_id = r_is_album_OLAK.group(1)
             if r_is_album_OLAK:
                 album_id = yt.get_album_browse_id(album_id)
             data = yt.get_album(album_id)
-            import json
-            print(json.dumps(data, indent= 2))
+            # print(json.dumps(data, indent= 2))
         elif r_is_playlist:
             is_playlist = True
             playlist_id = r_is_playlist.group(1)
             data = yt.get_playlist(playlist_id)
+        elif r_is_artist:
+            artist_id = r_is_artist.group(1)
+            logger.out(artist_id)
+            data = yt.get_artist(artist_id)
         else:
             logger.out("ERROR: CANT PARSE URL")
         if not data: return None
@@ -108,21 +116,40 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None):
         data_cover_url = re.sub(r'=s\d+$', "=s1200", data.get("thumbnails")[0]["url"])
         data_track_count = data.get("trackCount")
         data_albumId_cache = list(set(track["album"]["id"] for track in data["tracks"]))
-        # logger.out(f"=====\n{data_albumId_cache}\n=====")
         data_videoIds = [track["videoId"] for track in data["tracks"]]
-        # logger.out(str(data_videoIds))
-
-        # print(data_videoIds)
 
         data_tracks = []
         for track in data.get("tracks"):
-            
             data_tracks.append({
                 "videoId": track["videoId"],
                 "title": track["title"],
                 "artists": [a['name'] for a in track.get("artists", [])],
             })
 
+    elif r_is_artist:
+        data_artist = data["name"]
+        album_data = data.get("albums", {}).get("results", [])
+        singles_data = data.get("singles", {}).get("results", [])
+        data_albums = (
+            [{key: album[key] for key in ["browseId", "title", "type"]} for album in album_data] 
+            # + [{"browseId": s["browseId"], "title": s["title"], "type": s["year"]} for s in singles_data]
+        )
+        data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", data.get('thumbnails')[0]['url'])
+
+        data = {
+            'url': url,
+            'artist': data_artist,
+            'cover': data_cover_url,
+        }
+        data["albums"] = data_albums
+        data["albumCount"] = len(data_albums)
+        data["type"] = "artist"
+
+        logger.out(f"Found: {data["artist"]}")
+        logger.out(f"{data["albumCount"]} albums:")
+        logger.out(f"{"\n".join(f"   {index}. {album["browseId"]} {album["title"]} - {album["type"]}" for index, album in enumerate(data["albums"]))}")
+        
+        return data
     else:
         data_title = data.get('title')
         data_artist = ", ".join([a['name'] for a in data.get("artists", [])])
@@ -212,7 +239,7 @@ def download_lyrics(track, artist_string, final_file_path, logger : Logger = Log
                     f.write(lyrics)
 
 def download_track(track, data, config, cover_data, logger : Logger = Logger()) -> tuple[str, Path, str]:
-    v_id : str = str(track["videoId"])
+    video_id : str = str(track["videoId"])
     local_yt_dlp = os.path.join(os.getcwd(), "yt-dlp.exe")
     temp_path = Path(config["temp_dir"])
     final_album_dir = Path(config["out_dir"]) / f"{sanitise(data['artist'])} - {sanitise(data['title'])}"
@@ -220,7 +247,7 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()) 
     artist_string = ", ".join(track['artists'])
     artist_tag_string = "; ".join(track['artists'])
     
-    temp_filename = f"{v_id}.mp3"
+    temp_filename = f"{video_id}.mp3"
     temp_file_path = temp_path / temp_filename
     
     final_filename = f"{sanitise(str(track['trackNumber']))}. {sanitise(artist_string)} - {sanitise(track['title'])}.mp3"
@@ -238,7 +265,7 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()) 
             "--audio-format", "mp3",
             "--ffmpeg-location", os.getcwd(),
             "-o", os.path.join(temp_path, f"{track['videoId']}.%(ext)s"),
-            f"https://www.youtube.com/watch?v={v_id}",
+            f"https://www.youtube.com/watch?v={video_id}",
         ]
 
         startup_info = None
@@ -278,7 +305,7 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()) 
         
     logger.out(f"Finished: {track['title']}")
             
-    return v_id, final_file_path, track['trackNumber']
+    return video_id, final_file_path, track['trackNumber']
 
 def download_album(data, config, logger : Logger = Logger(), cover_data=None):
     out_path = Path(config["out_dir"])
@@ -297,7 +324,7 @@ def download_album(data, config, logger : Logger = Logger(), cover_data=None):
         except: pass
 
     logger.out(f"Starting Download: {data['artist']} - {data['title']}")
-    if cover_data is None: cover_data = get_album_cover(data["cover"])
+    if cover_data is None: cover_data = get_album_cover(data["cover"], logger)
     save_album_cover(cover_data, data["artist"], data["title"], cover_path, logger)
 
     start_timer()
@@ -320,7 +347,7 @@ def download_playlist_album(album_id, p_data, config, logger = Logger()):
     final_album_dir.mkdir(parents=True, exist_ok=True)
 
     logger.out(f"Starting Download: {album_data['artist']} - {album_data['title']}")
-    cover_data = get_album_cover(album_data["cover"])
+    cover_data = get_album_cover(album_data["cover"], logger)
     save_album_cover(cover_data, album_data["artist"], album_data["title"], cover_path, logger)
 
     playlsit_strings : list[str] = []
@@ -336,6 +363,22 @@ def download_playlist_album(album_id, p_data, config, logger = Logger()):
 
     logger.out(str(playlsit_strings))
     return playlsit_strings
+
+def download_album_by_id(album_id, config, logger = Logger()):
+    cover_path = Path(config["cover_dir"])
+    out_path = Path(config["out_dir"])
+
+    album_data = scrape_data("", logger=logger, album_id=album_id)
+
+    final_album_dir = out_path / f"{sanitise(album_data['artist'])} - {sanitise(album_data['title'])}"
+    final_album_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.out(f"Starting Download: {album_data['artist']} - {album_data['title']}")
+    cover_data = get_album_cover(album_data["cover"], logger)
+    save_album_cover(cover_data, album_data["artist"], album_data["title"], cover_path, logger)
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        executor.map(lambda track: download_track(track, album_data, config, cover_data, logger), album_data["tracks"])
 
 def download_playlist(p_data, config, logger = Logger()):
     global playlist_write_index
@@ -373,8 +416,33 @@ def download_playlist(p_data, config, logger = Logger()):
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING PLAYLIST")
     logger.out(str(playlsit_lines))
 
-    
 
+def download_artist(artist_data, config, logger = Logger()):
+    global playlist_write_index
+    playlist_write_index = 0
+
+    out_path = Path(config["out_dir"])
+    cover_path = Path(config["cover_dir"])
+    temp_path = Path(config["temp_dir"])
+
+    out_path.mkdir(parents=True, exist_ok=True)
+    cover_path.mkdir(parents=True, exist_ok=True)
+    temp_path.mkdir(parents=True, exist_ok=True)
+
+    for f in temp_path.glob("*"):
+        try: f.unlink()
+        except: pass
+
+    album_ids = [album["browseId"] for album in artist_data["albums"]]
+
+    start_timer()
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        executor.map(lambda album_id: download_album_by_id(album_id, config, logger), album_ids)
+
+    stop_timer(logger=logger)
+
+    logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING ARTIST")
 
 class Worker(QThread):
     log_signal = Signal(str)
@@ -397,6 +465,8 @@ class Worker(QThread):
             if not self.data_only:
                 if data["type"] == "playlist":
                     download_playlist(p_data=data, config=self.config, logger=logger)
+                elif data["type"] == "artist":
+                    download_artist(artist_data=data, config=self.config, logger=logger)
                 else:
                     download_album(data, self.config, logger=logger, cover_data=cover_data)
 
@@ -526,26 +596,35 @@ class MusicDownloaderGUI(QWidget):
     def update_info_panel(self, data, cover_data):
         style_key = "font-weight: bold; color: #FFD700;" 
         style_val = "color: #FFFFFF;"
-        
-        track_list_html = "<br>".join(
-            f"<span style='font-weight: bold; color: #FFFFFF;'>{track['trackNumber']}. </span>"
-            f"<span style='color: #FFFFFF;'>{track['title']}</span>"
-            for track in data["tracks"]
-    ) if data["type"] != "playlist" else "<br>".join(
-            f"<span style='color: #FFFFFF;'>{track['title']}</span>"
-            for track in data["tracks"]
-    )
 
-        indented_tracks = f"<div style='margin-left: 1em;'>{track_list_html}</div>"
 
-        info_text = (
-            f"<span style='{style_key}'>Title:</span> <span style='{style_val}'>{data.get('title', 'Unknown')}</span><br>"
-            f"<span style='{style_key}'>Artist:</span> <span style='{style_val}'>{data.get('artist', 'Unknown')}</span><br>"
-            f"<span style='{style_key}'>Year:</span> <span style='{style_val}'>{data.get('year', 'Unknown')}</span><br>"
-            f"<span style='{style_key}'>Type:</span> <span style='{style_val}'>{data.get('type', 'Unknown').capitalize()}</span><br>"
-            f"<span style='{style_key}'>Tracks:</span> <span style='{style_val}'>{data.get('trackcount', 0)}</span>"
-            f"{indented_tracks}"
-        )
+        if data["type"] == "artist":
+            list_html = "<br>".join(
+                f"<span style='font-weight: bold; color: #FFFFFF;'>{i}. </span>"
+                f"<span style='color: #FFFFFF;'>{album["title"]} - {album["type"]}</span>"
+                for i, album in enumerate(data["albums"]))
+            
+            info_text = (
+                f"<span style='{style_key}'>Artist:</span> <span style='{style_val}'>{data.get('artist', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Albums:</span> <span style='{style_val}'>{data.get('albumCount', 0)}</span>"
+                f"<div style='margin-left: 1em;'>{list_html}</div>"
+            )
+        else:
+            list_html = "<br>".join(
+                f"<span style='font-weight: bold; color: #FFFFFF;'>{track['trackNumber']}. </span>"
+                f"<span style='color: #FFFFFF;'>{track['title']}</span>"
+                for track in data["tracks"]) if data["type"] != "playlist" else "<br>".join(
+                            f"<span style='color: #FFFFFF;'>{track['title']}</span>"
+                            for track in data["tracks"])
+
+            info_text = (
+                f"<span style='{style_key}'>Title:</span> <span style='{style_val}'>{data.get('title', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Artist:</span> <span style='{style_val}'>{data.get('artist', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Year:</span> <span style='{style_val}'>{data.get('year', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Type:</span> <span style='{style_val}'>{data.get('type', 'Unknown').capitalize()}</span><br>"
+                f"<span style='{style_key}'>Tracks:</span> <span style='{style_val}'>{data.get('trackcount', 0)}</span>"
+                f"<div style='margin-left: 1em;'>{list_html}</div>"
+            )
         
         self.info_console.setHtml(info_text)
         sb = self.console.verticalScrollBar()
@@ -606,6 +685,8 @@ class MusicDownloaderGUI(QWidget):
         self.btn_fetch_data.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.start_btn.setText("Start Download")
+
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
