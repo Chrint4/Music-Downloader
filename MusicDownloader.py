@@ -582,7 +582,7 @@ class MusicDownloaderGUI(QWidget):
         
         self.btn_clear_data = QPushButton("Clear Data")
         self.btn_clear_data.setFixedWidth(80)
-        self.btn_clear_data.clicked.connect(lambda: self.reset_data())
+        self.btn_clear_data.clicked.connect(lambda: self.reset_data)
 
         batch_clear_widget = QHBoxLayout()
         batch_clear_widget.addWidget(self.batch_mode_checkbox)
@@ -592,7 +592,7 @@ class MusicDownloaderGUI(QWidget):
 
         self.single_url_input = QLineEdit()
         self.single_url_input.setPlaceholderText("Paste URL here...")
-        # self.single_url_input.textChanged.connect(self.reset_data)
+        self.single_url_input.textChanged.connect(self.reset_data)
         self.batch_url_input = QTextEdit()
         self.batch_url_input.setPlaceholderText("Paste URLs here (one per line)...")
         self.batch_url_input.setFixedHeight(100)
