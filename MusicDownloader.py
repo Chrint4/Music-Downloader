@@ -216,6 +216,72 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
 
     return data
 
+def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}):
+
+    if url is None:
+        return
+    
+    is_album = re.search(r'list\=(OLAK5uy_.+)', url)
+    is_playlist = re.search(r'list\=(PL.+)', url)
+    is_artist = re.search(r'channel/(UC.+)', url)
+
+    if is_album:
+        album_id = is_album.group(1)
+        album_id = yt.get_album_browse_id(album_id)
+        ytmusicapi_data = yt.get_album(album_id)
+
+        cmd = [
+            str(os.path.join(os.getcwd(), "yt-dlp.exe")),
+            "--flat-playlist",
+            "--print",
+            "%(id)s",
+            url,
+        ]
+
+        ytdlp_data = subprocess.run(cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    )
+        
+        video_urls = ytdlp_data.stdout.strip().splitlines()
+
+        data_title = ytmusicapi_data.get('title')
+        data_artist = ", ".join([a['name'] for a in ytmusicapi_data.get("artists", [])])
+        data_year = str(ytmusicapi_data.get('year'))
+        data_type = ytmusicapi_data.get('type', 'album').lower()
+        data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", ytmusicapi_data.get('thumbnails')[0]['url'])
+        data_track_count = ytmusicapi_data.get('trackCount')
+
+        data_tracks = [
+            {
+                "videoId": video_id,
+                "title": track.get("title"),
+                "artists": [a["name"] for a in track.get("artists", [])],
+                "trackNumber": track.get("trackNumber"),
+                "duration_seconds": track.get("duration_seconds"),
+            }
+            for track, video_id in zip(ytmusicapi_data.get('tracks', []), video_urls)
+        ]
+
+        data = {
+            'url': url,
+            'title': data_title,
+            'artist': data_artist,
+            'year': data_year,
+            'type': data_type,
+            'cover': data_cover_url,
+            'trackcount': data_track_count,
+            'tracks': data_tracks,
+        }
+
+        logger.out(f"Found: {data['title']} - {data['artist']}")
+        logger.out(f"Type: {data['type']}")
+        logger.out(f"{data['trackcount']} tracks found:")
+
+    return data
+
+
 def get_album_cover(cover_url, logger : Logger = Logger()):
     logger.out("Getting Album Cover...")
     try:
@@ -287,7 +353,6 @@ def download_track(track, data, config, cover_data, logger : Logger = Logger()) 
 
     if final_file_path.exists():
         logger.out(f"Skipping (Exists): {track['title']}")
-        # return v_id, final_file_path, track['trackNumber']
     else:
         cmd = [
             str(local_yt_dlp),
@@ -540,7 +605,8 @@ class Worker(QThread):
                 if len(self.urls) > 1:
                     logger.out(f"{'='*10}\nProcessing URL {i+1}/{len(self.urls)}")
                 
-                data = scrape_data(url, logger=logger, config=self.config)
+                # data = scrape_data(url, logger=logger, config=self.config)
+                data = new_scrape_data(url=url, logger=logger, config=self.config)
                     
                 if data:
                     cover_data = get_album_cover(data["cover"], logger=logger)
@@ -903,6 +969,7 @@ if __name__ == "__main__":
 
     if args.ytb_url:
         logger = Logger(print if args.verbose else None)
+        # data = new_scrape_data(url=args.ytb_url, logger=logger, config=config)
         data = scrape_data(args.ytb_url, logger=logger, config=config)
         if data:
             if args.verbose: print(f"Downloading: {data["artist"]} - {data["album"]}...")
