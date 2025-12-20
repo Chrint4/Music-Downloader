@@ -6,3 +6,4 @@ dist/
 build/
 MusicDownloader.spec
 build.txt
+test.py

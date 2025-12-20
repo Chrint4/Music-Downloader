@@ -210,14 +210,69 @@ def scrape_data(url : str = "", logger : Logger = Logger(), album_id = None, con
         data["albumId_cache"] = data_albumId_cache
         data["videoIds"] = data_videoIds
 
+        
+
     logger.out(f"Found: {data['title']} - {data['artist']}")
     logger.out(f"Type: {data['type']}")
     logger.out(f"{data['trackcount']} tracks found:")
 
     return data
 
-def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}):
+def scrape_album(album_id : str, logger : Logger = Logger(), config = {}) -> dict[str, any]:
+    ytmusicapi_data = yt.get_album(album_id)
 
+    cmd = [
+        str(os.path.join(os.getcwd(), "yt-dlp.exe")),
+        "--flat-playlist",
+        "--print",
+        "%(id)s",
+        ytmusicapi_data["audioPlaylistId"],
+    ]
+
+    ytdlp_data = subprocess.run(cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                )
+    
+    ytdlp_data = ytdlp_data.stdout.strip().splitlines()
+
+    data_title = ytmusicapi_data.get('title')
+    data_artist = ", ".join([a['name'] for a in ytmusicapi_data.get("artists", [])])
+    data_year = str(ytmusicapi_data.get('year'))
+    data_type = ytmusicapi_data.get('type', 'album').lower()
+    data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", ytmusicapi_data.get('thumbnails')[0]['url'])
+    data_track_count = ytmusicapi_data.get('trackCount')
+
+    data_tracks = [
+        {
+            "videoId": video_id,
+            "title": track.get("title"),
+            "artists": [a["name"] for a in track.get("artists", [])],
+            "trackNumber": track.get("trackNumber"),
+            "duration_seconds": track.get("duration_seconds"),
+        }
+        for track, video_id in zip(ytmusicapi_data.get('tracks', []), ytdlp_data)
+    ]
+    logger.out(f"data_tracks: {data_tracks}")
+    logger.out(f"ytmusicdata: {ytmusicapi_data.get('tracks', [])}")
+    logger.out(f"ytdlpdata: {ytdlp_data}")
+
+    data = {
+        'url': album_id,
+        'title': data_title,
+        'artist': data_artist,
+        'year': data_year,
+        'type': data_type,
+        'cover': data_cover_url,
+        'trackcount': data_track_count,
+        'tracks': data_tracks,
+    }
+
+    return data
+
+
+def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}, album_id = None):
     if url is None:
         return
     
@@ -228,7 +283,15 @@ def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}):
     if is_album:
         album_id = is_album.group(1)
         album_id = yt.get_album_browse_id(album_id)
-        ytmusicapi_data = yt.get_album(album_id)
+        data = scrape_album(album_id, logger)
+
+        logger.out(f"Found: {data['title']} - {data['artist']}")
+        logger.out(f"Type: {data['type']}")
+        logger.out(f"{len(data["tracks"])} tracks found:")
+
+    elif is_playlist:
+        playlist_id = is_playlist.group(1)
+        ytmusicapi_data = yt.get_playlist(playlist_id)
 
         cmd = [
             str(os.path.join(os.getcwd(), "yt-dlp.exe")),
@@ -244,25 +307,24 @@ def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}):
                                     text=True,
                                     )
         
-        video_urls = ytdlp_data.stdout.strip().splitlines()
+        ytdlp_data = ytdlp_data.stdout.strip().splitlines()
 
-        data_title = ytmusicapi_data.get('title')
-        data_artist = ", ".join([a['name'] for a in ytmusicapi_data.get("artists", [])])
-        data_year = str(ytmusicapi_data.get('year'))
-        data_type = ytmusicapi_data.get('type', 'album').lower()
-        data_cover_url = re.sub(r'w\d+-h\d+', "w1200-h1200", ytmusicapi_data.get('thumbnails')[0]['url'])
-        data_track_count = ytmusicapi_data.get('trackCount')
+        data_title = ytmusicapi_data.get("title")
+        data_artist = ytmusicapi_data.get("author").get("name")
+        data_year = ytmusicapi_data.get("year")
+        data_type = "playlist"
+        data_cover_url = re.sub(r'=s\d+$', "=s1200", ytmusicapi_data.get("thumbnails")[0]["url"])
+        data_track_count = ytmusicapi_data.get("trackCount")
 
-        data_tracks = [
-            {
-                "videoId": video_id,
-                "title": track.get("title"),
-                "artists": [a["name"] for a in track.get("artists", [])],
-                "trackNumber": track.get("trackNumber"),
-                "duration_seconds": track.get("duration_seconds"),
-            }
-            for track, video_id in zip(ytmusicapi_data.get('tracks', []), video_urls)
-        ]
+        data_tracks = []
+        for track, videoId in zip(ytmusicapi_data.get("tracks"), ytdlp_data):
+            data_tracks.append({
+                "videoId": videoId,
+                "title": track["title"],
+                "artists": [a['name'] for a in track.get("artists", [])],
+                "album_name": track["album"]["name"],
+                "album_id": track["album"]["id"],
+            })
 
         data = {
             'url': url,
@@ -273,11 +335,13 @@ def new_scrape_data(url : str = None, logger : Logger = Logger(), config = {}):
             'cover': data_cover_url,
             'trackcount': data_track_count,
             'tracks': data_tracks,
+            # 'track_ids': ytdlp_data,
         }
 
-        logger.out(f"Found: {data['title']} - {data['artist']}")
-        logger.out(f"Type: {data['type']}")
-        logger.out(f"{data['trackcount']} tracks found:")
+    import json
+    logger.out(json.dumps(data, indent=2), also_print=True)
+    logger.out("TEST")
+
 
     return data
 
@@ -433,9 +497,10 @@ def download_album(data, config, logger : Logger = Logger(), cover_data=None):
 
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING ALBUM")
 
-def download_playlist_album(album_id, p_data, config, logger = Logger()):
+def download_playlist_album(track, config, logger = Logger()):
     global playlist_write_index
-    album_data = scrape_data("", logger=logger, album_id=album_id)
+    # yt_album_data = yt.get_album(track["album_id"])
+    album_data = scrape_album(album_id=track["album_id"], logger=logger)
 
     out_path = Path(config["out_dir"])
     cover_path = Path(config["cover_dir"])
@@ -452,9 +517,9 @@ def download_playlist_album(album_id, p_data, config, logger = Logger()):
         r = executor.map(lambda track: download_track(track, album_data, config, cover_data, logger), album_data["tracks"])
         for video_id, final_file_path, trackNum in r:
             logger.out(f"{video_id} - {final_file_path}")
-            if video_id in p_data["videoIds"]:
+            if video_id in track["videoId"]:
                 with file_lock:
-                    playlsit_string = f"File{playlist_write_index}={final_file_path}"
+                    playlsit_string = f"File{playlist_write_index}={final_file_path}\n"
                     playlist_write_index += 1
                 playlsit_strings.append(playlsit_string)
 
@@ -479,7 +544,7 @@ def download_album_by_id(album_id, config, logger = Logger()):
 
 def download_playlist(p_data, config, logger = Logger()):
     global playlist_write_index
-    playlist_write_index = 0
+    playlist_write_index = 1
 
     out_path = Path(config["out_dir"])
     cover_path = Path(config["cover_dir"])
@@ -490,6 +555,9 @@ def download_playlist(p_data, config, logger = Logger()):
 
     playlsit_file_path = Path(out_path / f"{p_data["artist"]} - {p_data["title"]}.pls")
 
+    playlsit_folder_path = Path(out_path / f"{p_data["artist"]} - {p_data["title"]}")
+    playlsit_folder_path.mkdir(parents=True, exist_ok=True)
+
     for f in temp_path.glob("*"):
         try: f.unlink()
         except: pass
@@ -498,15 +566,14 @@ def download_playlist(p_data, config, logger = Logger()):
 
     start_timer()
     with ThreadPoolExecutor(max_workers=5) as executor:
-        r = executor.map(lambda album_id: download_playlist_album(album_id, p_data, config, logger), p_data["albumId_cache"])
+        r = executor.map(lambda track: download_playlist_album(track, config, logger), p_data["tracks"])
         for strings in r:
             playlsit_lines.extend(strings)
 
     with open(playlsit_file_path, "w") as playlist_file:
         playlist_file.write("[playlist]\n")
         playlist_file.writelines(playlsit_lines)
-        playlist_file.write("Version=2\n")
-
+        playlist_file.write(f"NumberOfEntries={len(p_data["tracks"])}\nVersion=2\n")
 
     stop_timer(logger=logger)
 
@@ -540,36 +607,6 @@ def download_artist(artist_data, config, logger = Logger()):
     stop_timer(logger=logger)
 
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING ARTIST")
-
-class Worker(QThread):
-    log_signal = Signal(str)
-    finished_signal = Signal()
-    data_signal = Signal(dict, bytes)
-
-    def __init__(self, url, config, data_only = False):
-        super().__init__()
-        self.url = url
-        self.config = config
-        self.data_only = data_only
-
-    def run(self):
-        logger = Logger(logger=self.log_signal.emit)
-
-        data = scrape_data(self.url, logger=logger, config=self.config)
-        if data:
-            cover_data = get_album_cover(data["cover"], logger=logger)
-            self.data_signal.emit(data, cover_data if cover_data else b'')
-
-            if not self.data_only:
-                if data["type"] == "playlist":
-                    download_playlist(p_data=data, config=self.config, logger=logger)
-                elif data["type"] == "artist":
-                    download_artist(artist_data=data, config=self.config, logger=logger)
-                else:
-                    download_album(data, self.config, logger=logger, cover_data=cover_data)
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
-
-        self.finished_signal.emit()
 
 class Worker(QThread):
     log_signal = Signal(str)
@@ -894,7 +931,7 @@ class MusicDownloaderGUI(QWidget):
                 item.setCheckState(Qt.Checked)
                 item.setData(Qt.UserRole, album['browseId'])
                 self.item_list.addItem(item)
-        else:
+        elif data["type"] == "album":
             list_html = "<br>".join(
                 f"<span style='font-weight: bold; color: #FFFFFF;'>{track['trackNumber']}. </span>"
                 f"<span style='color: #FFFFFF;'>{track['title']}</span>"
@@ -913,6 +950,29 @@ class MusicDownloaderGUI(QWidget):
 
             for track in data["tracks"]:
                 item = QListWidgetItem(f"{track['trackNumber']}. {track['title']}")
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                item.setData(Qt.UserRole, track.get('videoId'))
+                self.item_list.addItem(item)
+        elif data["type"] == "playlist":
+            list_html = "<br>".join(
+                f"<span style='font-weight: bold; color: #FFFFFF;'>{track['trackNumber']}. </span>"
+                f"<span style='color: #FFFFFF;'>{track['title']}</span>"
+                for track in data["tracks"]) if data["type"] != "playlist" else "<br>".join(
+                            f"<span style='color: #FFFFFF;'>{track['title']}</span>"
+                            for track in data["tracks"])
+
+            info_text = (
+                f"<span style='{style_key}'>Title:</span> <span style='{style_val}'>{data.get('title', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Artist:</span> <span style='{style_val}'>{data.get('artist', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Year:</span> <span style='{style_val}'>{data.get('year', 'Unknown')}</span><br>"
+                f"<span style='{style_key}'>Type:</span> <span style='{style_val}'>{data.get('type', 'Unknown').capitalize()}</span><br>"
+                f"<span style='{style_key}'>Tracks:</span> <span style='{style_val}'>{data.get('trackcount', 0)}</span>"
+                f"<div style='margin-left: 1em;'>{list_html}</div>"
+            )
+
+            for track_num, track in enumerate(data["tracks"]):
+                item = QListWidgetItem(f"{track_num}. {track['title']}")
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked)
                 item.setData(Qt.UserRole, track.get('videoId'))
