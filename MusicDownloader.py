@@ -497,7 +497,7 @@ def download_album(data, config, logger : Logger = Logger(), cover_data=None):
 
     logger.out(f"{'=' * 10}\nFINISHED DOWNLOADING ALBUM")
 
-def download_playlist_album(track, config, logger = Logger()):
+def download_playlist_album(i, track, config, logger = Logger()):
     global playlist_write_index
     # yt_album_data = yt.get_album(track["album_id"])
     album_data = scrape_album(album_id=track["album_id"], logger=logger)
@@ -519,7 +519,7 @@ def download_playlist_album(track, config, logger = Logger()):
             logger.out(f"{video_id} - {final_file_path}")
             if video_id in track["videoId"]:
                 with file_lock:
-                    playlsit_string = f"File{playlist_write_index}={final_file_path}\n"
+                    playlsit_string = f"File{i}={final_file_path}\n"
                     playlist_write_index += 1
                 playlsit_strings.append(playlsit_string)
 
@@ -566,7 +566,7 @@ def download_playlist(p_data, config, logger = Logger()):
 
     start_timer()
     with ThreadPoolExecutor(max_workers=5) as executor:
-        r = executor.map(lambda track: download_playlist_album(track, config, logger), p_data["tracks"])
+        r = executor.map(lambda track: download_playlist_album(track[0], track[1], config, logger), [(i, x) for i, x in enumerate(p_data["tracks"])])
         for strings in r:
             playlsit_lines.extend(strings)
 
